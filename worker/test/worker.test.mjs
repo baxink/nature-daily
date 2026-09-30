@@ -133,6 +133,14 @@ function createDbMock(state) {
         async run() {
           queries.push({ sql, params, method: 'run' });
 
+          if (sql.includes('UPDATE daily_digest_cards SET title_zh = ?, summary_zh = ?')) {
+            const [titleZh, summaryZh, digestDate, sourceId, articleId, selectedAt] = params;
+            const row = getCard(digestDate, sourceId);
+            const matches = row && row.article_id === articleId && row.selected_at === selectedAt;
+            if (matches) setCard({ ...row, title_zh: titleZh, summary_zh: summaryZh });
+            return { success: true, meta: { changes: matches ? 1 : 0 } };
+          }
+
           if (sql.includes('INSERT OR REPLACE INTO daily_digest_cards')) {
             const [digestDate, sourceId, section, articleId, titleEn, titleZh, summaryEn, summaryZh, url, imageUrl, publishedAt, selectedAt, isEmpty] = params;
             setCard({
@@ -473,6 +481,77 @@ test('ingest replaces a prior empty placeholder when a source later has an artic
   }
 });
 
+test('ingest backfills only Chinese fields for an existing card and skips it after successful translation', async () => {
+  const mod = await loadModule('../src/index.ts');
+  const restoreDate = installFixedDate('2026-05-15T04:00:00.000Z');
+  const today = currentDigestDate();
+  const original = createDailyCard({
+    digest_date: today,
+    source_id: 'nature-news',
+    section: 'news',
+    article_id: 'stable-article-id',
+    title_en: 'A discovery in ocean science',
+    title_zh: 'A discovery in ocean science',
+    summary_en: 'Researchers found a new pattern.',
+    summary_zh: 'Researchers found a new pattern.',
+    url: 'https://www.nature.com/articles/stable',
+    image_url: 'https://www.nature.com/image.jpg',
+    published_at: '2026-05-14T00:00:00.000Z',
+    selected_at: '2026-05-14T01:00:00.000Z',
+    is_empty: 0,
+  });
+  const state = {
+    dailyCardsByDate: new Map([[today, new Map([['nature-news', original]])]]),
+    recentArticleIdsBySource: new Map(),
+    mediaNameBySource: new Map(),
+  };
+  const db = createDbMock(state);
+  let aiCalls = 0;
+  const env = {
+    DB: db,
+    AI: { async run(model) {
+      aiCalls++;
+      assert.equal(model, '@cf/custom/translation-model');
+      return { response: '{"titleZh":"海洋科学的一项发现","summaryZh":"研究人员发现了一种新模式。"}' };
+    } },
+    AI_MODEL: '@cf/custom/translation-model',
+    FRONTEND_ORIGIN: 'https://baxink.github.io',
+    INGEST_TOKEN: 'test-token',
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('<rss version="2.0"><channel></channel></rss>', { status: 200 });
+
+  try {
+    const request = () => mod.default.fetch(new Request('https://example.com/api/ingest', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token' },
+    }), env);
+    const firstResponse = await request();
+    assert.equal(firstResponse.status, 200);
+    const firstResult = await firstResponse.json();
+    assert.equal(firstResult.translationAttempted, 1);
+    assert.equal(firstResult.translationSucceeded, 1);
+    assert.equal(firstResult.translationFailed, 0);
+    const translated = state.dailyCardsByDate.get(today).get('nature-news');
+    assert.equal(translated.title_zh, '海洋科学的一项发现');
+    assert.equal(translated.summary_zh, '研究人员发现了一种新模式。');
+    for (const field of ['article_id', 'title_en', 'summary_en', 'url', 'image_url', 'published_at', 'selected_at']) {
+      assert.equal(translated[field], original[field], `${field} must remain unchanged`);
+    }
+    const update = db.queries.find(query => query.sql.includes('UPDATE daily_digest_cards SET title_zh = ?, summary_zh = ?'));
+    assert.match(update.sql, /article_id = \? AND selected_at = \?/);
+    assert.deepEqual(update.params.slice(2), [today, 'nature-news', original.article_id, original.selected_at]);
+
+    const secondResult = await (await request()).json();
+    assert.equal(secondResult.translationAttempted, 0);
+    assert.equal(secondResult.translationSucceeded, 0);
+    assert.equal(aiCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreDate();
+  }
+});
+
 test('falls back to the legacy single digest row when card rows are not ready yet', async () => {
   const mod = await loadModule('../src/index.ts');
   const today = currentDigestDate();
@@ -777,4 +856,71 @@ test('fetchHtml reads published time from nearby metadata', async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+function translationState(overrides = {}) {
+  const day = currentDigestDate();
+  const card = createDailyCard({
+    digest_date: day, source_id: 'nature-main-rss', section: 'main',
+    article_id: 'original-id', title_en: 'Original title', title_zh: 'Original title',
+    summary_en: '', summary_zh: 'Original title', url: 'https://www.nature.com/articles/original',
+    selected_at: '2026-09-29T22:00:00.000Z', is_empty: 0, ...overrides,
+  });
+  return { dailyCardsByDate: new Map([[day, new Map([['nature-main-rss', card]])]]),
+    recentArticleIdsBySource: new Map(), mediaNameBySource: new Map() };
+}
+
+async function runTranslationIngest(state, ai) {
+  const mod = await loadModule('../src/index.ts');
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('');
+  try {
+    const response = await mod.default.fetch(new Request('https://example.com/api/ingest', {
+      method: 'POST', headers: { Authorization: 'Bearer test-token' },
+    }), { DB: createDbMock(state), AI: ai, INGEST_TOKEN: 'test-token' });
+    assert.equal(response.status, 200);
+    return response.json();
+  } finally { globalThis.fetch = savedFetch; }
+}
+
+test('ingest repairs stored English without changing selection and skips repaired cards next time', async () => {
+  const state = translationState();
+  const cards = state.dailyCardsByDate.get(currentDigestDate());
+  const before = { ...cards.get('nature-main-rss') };
+  let calls = 0;
+  const ai = { async run() { calls++; return { response: '{"titleZh":"原文标题","summaryZh":""}' }; } };
+  const result = await runTranslationIngest(state, ai);
+  assert.equal(result.translationSucceeded, 1);
+  assert.deepEqual(cards.get('nature-main-rss'), { ...before, title_zh: '原文标题', summary_zh: null });
+  const repeated = await runTranslationIngest(state, ai);
+  assert.equal(repeated.translationAttempted, 0);
+  assert.equal(calls, 1);
+});
+
+test('failed backfill preserves the original and a later ingest retries missing summaries', async () => {
+  const state = translationState({ title_zh: '已有标题', summary_en: 'Real English summary', summary_zh: null });
+  const cards = state.dailyCardsByDate.get(currentDigestDate());
+  const before = { ...cards.get('nature-main-rss') };
+  const failed = await runTranslationIngest(state, { async run() { throw new Error('model unavailable'); } });
+  assert.equal(failed.translationFailed, 1);
+  assert.match(failed.errors.join(' '), /model unavailable/);
+  assert.deepEqual(cards.get('nature-main-rss'), before);
+  const recovered = await runTranslationIngest(state, { async run() {
+    return { response: '{"titleZh":"已有标题","summaryZh":"真实中文摘要"}' };
+  } });
+  assert.equal(recovered.translationSucceeded, 1);
+  assert.equal(cards.get('nature-main-rss').summary_zh, '真实中文摘要');
+});
+
+test('backfill does not put an old translation on a concurrently refreshed article', async () => {
+  const state = translationState();
+  const cards = state.dailyCardsByDate.get(currentDigestDate());
+  const replacement = { ...cards.get('nature-main-rss'), article_id: 'replacement',
+    url: 'https://www.nature.com/articles/replacement', title_zh: '新文章', selected_at: '2026-09-30T10:00:00Z' };
+  const result = await runTranslationIngest(state, { async run() {
+    cards.set('nature-main-rss', replacement);
+    return { response: '{"titleZh":"旧文章译文","summaryZh":""}' };
+  } });
+  assert.deepEqual(cards.get('nature-main-rss'), replacement);
+  assert.equal(result.translationSucceeded, 0);
 });

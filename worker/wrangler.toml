@@ -7,6 +7,7 @@ crons = ["0 22 * * *"]
 
 [vars]
 FRONTEND_ORIGIN = "https://baxink.github.io"
+AI_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast"
 
 [ai]
 binding = "AI"

@@ -16,6 +16,7 @@
     "src/index.ts",
     "src/normalize.ts",
     "src/sources.ts",
+    "src/translation.ts",
     "src/fetchers/**/*.ts"
   ]
 }

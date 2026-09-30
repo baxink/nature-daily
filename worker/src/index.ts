@@ -2,6 +2,7 @@ import { getEnabledSources, getSourceById, type MediaSource } from './sources';
 import { normalizeArticles, type NormalizedArticle } from './normalize';
 import { fetchRss } from './fetchers/rss';
 import { fetchHtml } from './fetchers/html';
+import { containsChinese, translateToChinese } from './translation';
 
 interface Env {
   DB: D1Database;
@@ -9,6 +10,7 @@ interface Env {
   FRONTEND_ORIGIN: string;
   FREE_API_KEY?: string;
   INGEST_TOKEN?: string;
+  AI_MODEL?: string;
 }
 
 interface IngestRow {
@@ -157,52 +159,8 @@ function normalizeSectionLabel(section: string): string {
     .join(' ');
 }
 
-function stripMarkdownFence(text: string): string {
-  return text.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
-}
-
 async function summarizeInChinese(env: Env, article: NormalizedArticle): Promise<{ titleZh: string; summaryZh: string }> {
-  const prompt = `请把下面这篇 Nature 文章信息整理成简体中文。
-
-要求：标题简洁准确；摘要 2-3 句，忠于原意，不要编造。
-只返回 JSON，格式为 {"titleZh":"...","summaryZh":"..."}。
-
-原标题：${article.title}
-英文摘要：${article.summary || article.title}`;
-
-  try {
-    const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
-      messages: [
-        { role: 'system', content: '你是一个科研文章翻译助手，把英文 Nature 文章信息整理成简体中文，只输出 JSON。' },
-        { role: 'user', content: prompt },
-      ],
-      max_tokens: 512,
-      temperature: 0.3,
-    }) as { response?: string };
-
-    const outputText = result.response || '';
-    console.log(`[summarize] raw: ${outputText.slice(0, 100)}`);
-    const text = stripMarkdownFence(outputText);
-
-    try {
-      const parsed = JSON.parse(text) as { titleZh?: string; summaryZh?: string };
-      if (parsed.titleZh && parsed.summaryZh) {
-        return {
-          titleZh: parsed.titleZh.trim(),
-          summaryZh: parsed.summaryZh.trim(),
-        };
-      }
-    } catch {
-      console.error(`[summarize] JSON parse failed: ${text.slice(0, 200)}`);
-    }
-  } catch (err) {
-    console.error(`[summarize] AI error: ${String(err)}`);
-  }
-
-  return {
-    titleZh: article.title,
-    summaryZh: article.summary || article.title,
-  };
+  return translateToChinese(env.AI, { title: article.title, summary: article.summary || '' }, env.AI_MODEL);
 }
 
 function buildEmptyCardRow(source: MediaSource, digestDate: string, selectedAt: string = new Date().toISOString()): DailyDigestCardRow {
@@ -230,9 +188,9 @@ function mapDigestCardRow(source: MediaSource, row: DailyDigestCardRow): DailyDi
     section: normalizeSectionLabel(source.section),
     sectionKey: source.section,
     mediaName: source.mediaName,
-    title: row.title_zh || '',
+    title: row.title_zh || row.title_en || '',
     titleEn: row.title_en || '',
-    summary: row.summary_zh || '',
+    summary: row.summary_zh || row.summary_en || '',
     summaryEn: row.summary_en || '',
     url: row.url || '',
     imageUrl: row.image_url || '',
@@ -363,7 +321,8 @@ async function selectDigestCardForSource(
   source: MediaSource,
   articles: NormalizedArticle[],
   digestDate: string,
-  excludeIds: Set<string> = new Set()
+  excludeIds: Set<string> = new Set(),
+  translations?: TranslationStats,
 ): Promise<DailyDigestCardRow | null> {
   const recentRows = await env.DB.prepare(
     'SELECT article_id FROM daily_digest_cards WHERE source_id = ? AND is_empty = 0 ORDER BY digest_date DESC LIMIT 14'
@@ -384,7 +343,19 @@ async function selectDigestCardForSource(
     return upsertDigestCard(env, buildEmptyCardRow(source, digestDate));
   }
 
-  const localized = await summarizeInChinese(env, selected);
+  let localized: { titleZh: string; summaryZh: string } = { titleZh: '', summaryZh: '' };
+  if (translations) translations.attempted++;
+  try {
+    localized = await summarizeInChinese(env, selected);
+    if (translations) translations.succeeded++;
+  } catch (error) {
+    const code = translationErrorCode(error);
+    if (translations) {
+      translations.failed++;
+      translations.errors.push(`${source.id}: ${code}`);
+    }
+    console.error(`[translation] failed for source=${source.id}: ${code}`);
+  }
 
   return upsertDigestCard(env, {
     digest_date: digestDate,
@@ -403,34 +374,108 @@ async function selectDigestCardForSource(
   });
 }
 
+function translationErrorCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'unknown error';
+  return message.slice(0, 160);
+}
+
+interface TranslationStats {
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  errors: string[];
+}
+
+function needsTranslation(row: DailyDigestCardRow): boolean {
+  return !containsChinese(row.title_zh)
+    || Boolean(row.summary_en?.trim() && !containsChinese(row.summary_zh))
+    || Boolean(row.summary_zh?.trim() && !containsChinese(row.summary_zh));
+}
+
+async function backfillDigestCardTranslation(env: Env, row: DailyDigestCardRow): Promise<{ titleZh: string; summaryZh: string } | null> {
+  if (!row.title_en?.trim()) return null;
+  const localized = await translateToChinese(env.AI, {
+    title: row.title_en,
+    summary: row.summary_en || '',
+  }, env.AI_MODEL);
+  const result = await env.DB.prepare(
+    'UPDATE daily_digest_cards SET title_zh = ?, summary_zh = ? WHERE digest_date = ? AND source_id = ? AND article_id = ? AND selected_at = ?'
+  ).bind(localized.titleZh, localized.summaryZh || null, row.digest_date, row.source_id, row.article_id, row.selected_at).run();
+  const changes = (result as { meta?: { changes?: number } } | undefined)?.meta?.changes;
+  return changes === 0 ? null : localized;
+}
+
 async function ensureDailyDigestCards(
   env: Env,
   sources: MediaSource[],
   articlesBySource: Map<string, NormalizedArticle[]>,
   digestDate: string
-): Promise<DailyDigestCardRow[]> {
+): Promise<{ cards: DailyDigestCardRow[]; translations: TranslationStats }> {
   const existingRows = await fetchDigestCardsByDate(env, digestDate);
   const rowBySourceId = new Map(existingRows.map(row => [row.source_id, row]));
+  const translations: TranslationStats = { attempted: 0, succeeded: 0, failed: 0, errors: [] };
 
   for (const source of sources) {
     const existingRow = rowBySourceId.get(source.id);
-    if (existingRow && existingRow.is_empty === 0) continue;
+    if (existingRow && existingRow.is_empty === 0) {
+      if (!needsTranslation(existingRow)) continue;
+      if (!existingRow.title_en?.trim()) {
+        translations.failed++;
+        translations.errors.push(`${source.id}: missing English title`);
+        continue;
+      }
+      translations.attempted++;
+      try {
+        const localized = await backfillDigestCardTranslation(env, existingRow);
+        if (localized) {
+          translations.succeeded++;
+          rowBySourceId.set(source.id, {
+            ...existingRow,
+            title_zh: localized.titleZh,
+            summary_zh: localized.summaryZh || null,
+          });
+        }
+      } catch (error) {
+        const code = translationErrorCode(error);
+        translations.failed++;
+        translations.errors.push(`${source.id}: ${code}`);
+        console.error(`[translation] backfill failed for source=${source.id}: ${code}`);
+      }
+      continue;
+    }
 
     const row = await selectDigestCardForSource(
       env,
       source,
       articlesBySource.get(source.id) || [],
-      digestDate
+      digestDate,
+      new Set(),
+      translations,
     );
-    if (row) rowBySourceId.set(source.id, row);
+    if (row) {
+      rowBySourceId.set(source.id, row);
+    }
   }
 
-  return sources
+  const cards = sources
     .map(source => rowBySourceId.get(source.id))
     .filter((row): row is DailyDigestCardRow => Boolean(row));
+  return { cards, translations };
 }
 
-async function runIngest(env: Env): Promise<{ runId: string; status: string; successCount: number; failureCount: number; totalSources: number; digestDate: string; digestCreated: boolean; errors?: string[] }> {
+async function runIngest(env: Env): Promise<{
+  runId: string;
+  status: string;
+  successCount: number;
+  failureCount: number;
+  totalSources: number;
+  digestDate: string;
+  digestCreated: boolean;
+  translationAttempted: number;
+  translationSucceeded: number;
+  translationFailed: number;
+  errors?: string[];
+}> {
   const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = new Date().toISOString();
 
@@ -465,7 +510,8 @@ async function runIngest(env: Env): Promise<{ runId: string; status: string; suc
   }
 
   const digestDate = toDigestDate();
-  const cards = await ensureDailyDigestCards(env, sources, articlesBySource, digestDate);
+  const { cards, translations } = await ensureDailyDigestCards(env, sources, articlesBySource, digestDate);
+  errors.push(...translations.errors.map(error => `translation: ${error}`));
   const status = successCount > 0 ? 'success' : 'failed';
   const finishedAt = new Date().toISOString();
 
@@ -485,6 +531,9 @@ async function runIngest(env: Env): Promise<{ runId: string; status: string; suc
     totalSources: sources.length,
     digestDate,
     digestCreated: cards.length > 0,
+    translationAttempted: translations.attempted,
+    translationSucceeded: translations.succeeded,
+    translationFailed: translations.failed,
     errors: errors.length > 0 ? errors : undefined,
   };
 }

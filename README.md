@@ -18,7 +18,7 @@
 |---|---|
 | 前端 | HTML / CSS / JS → GitHub Pages |
 | 后端 | Cloudflare Workers (TypeScript) |
-| 翻译 | Cloudflare Workers AI (`llama-3.1-8b-instruct`) |
+| 翻译 | Cloudflare Workers AI (`llama-3.1-8b-instruct-fast`) |
 | 数据库 | Cloudflare D1 |
 | 定时 | Workers Cron Triggers (`0 22 * * *` UTC = 北京时间 6:00) |
 
@@ -80,6 +80,8 @@ curl -X POST https://<your-worker>.workers.dev/api/ingest \
 
 手动调用前，将刚才设置的同一个密钥放入本地环境变量 `INGEST_TOKEN`。前端公开的日报和“换一篇”功能不需要这个密钥。
 
+翻译模型通过 Worker 变量 `AI_MODEL` 配置，默认值为 `@cf/meta/llama-3.1-8b-instruct-fast`。ingest 会补译缺失或仍为英文的日报卡片；失败时保留原卡片，并在响应的 `translationFailed` 和 `errors` 字段中记录简短原因，后续 ingest 会重试。
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -88,3 +90,5 @@ curl -X POST https://<your-worker>.workers.dev/api/ingest \
 | POST | `/api/daily/refresh` | **换一篇**：按 `sourceId` 单独刷新一个版面 |
 | GET | `/api/meta` | 数据库统计信息 |
 | POST | `/api/ingest` | 手动触发抓取与选文 |
+
+翻译模型由 `worker/wrangler.toml` 的 `AI_MODEL` 配置。模型停用或翻译失败后，定时任务与手动 ingest 会重试已有卡片的缺失中文，并保留原选文。返回结果提供 translationAttempted、translationSucceeded、translationFailed 及错误简述。没有原始摘要时只翻译标题，不生成推测性摘要。

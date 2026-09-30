@@ -29,7 +29,7 @@ test('uses the configured model and accepts valid Chinese JSON', async () => {
   assert.deepEqual(result, { titleZh: '海洋科学的新发现', summaryZh: '研究人员发现了海洋环流的新模式。' });
 });
 
-test('defaults to the supported fast model', async () => {
+test('defaults to the supported GLM model', async () => {
   let usedModel;
   await mod.translateToChinese({
     async run(model) {
@@ -37,7 +37,7 @@ test('defaults to the supported fast model', async () => {
       return { response: '{"titleZh":"海洋科学的新发现","summaryZh":"研究人员发现了海洋环流的新模式。"}' };
     },
   }, input);
-  assert.equal(usedModel, '@cf/meta/llama-3.1-8b-instruct-fast');
+  assert.equal(usedModel, '@cf/zai-org/glm-4.7-flash');
 });
 
 test('rejects model errors, malformed JSON, null, non-string, empty, and English results', async (t) => {

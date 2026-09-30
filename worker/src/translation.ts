@@ -12,7 +12,7 @@ interface AiBinding {
   run(model: string, input: Record<string, unknown>): Promise<unknown>;
 }
 
-const DEFAULT_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fast';
+const DEFAULT_AI_MODEL = '@cf/zai-org/glm-4.7-flash';
 const HAN_CHARACTERS = /[\u3400-\u4dbf\u4e00-\u9fff]/;
 
 export function containsChinese(value: string | null | undefined): boolean {
@@ -69,7 +69,7 @@ export async function translateToChinese(
   configuredModel?: string,
 ): Promise<ChineseTranslation> {
   const hasSummary = Boolean(article.summary.trim());
-  const prompt = `请把下面这篇 Nature 文章信息整理成简体中文。\n\n要求：标题简洁准确；${hasSummary
+  const prompt = `请把下面这篇 Nature 文章信息整理成简体中文。\n\n要求：标题简洁准确，保留作者更正、撤稿等限定信息，不猜测或改写专有名词；${hasSummary
     ? '摘要用 2-3 句概括，忠于原意，不要编造。'
     : '没有英文摘要，只翻译标题；summaryZh 必须是空字符串，不要根据标题编造摘要。'}\n只返回 JSON，格式为 {"titleZh":"...","summaryZh":"..."}。\n\n原标题：${article.title}\n英文摘要：${article.summary || '（无）'}`;
   const result = await ai.run(configuredModel?.trim() || DEFAULT_AI_MODEL, {
@@ -77,6 +77,7 @@ export async function translateToChinese(
       { role: 'system', content: '你是一个科研文章翻译助手，把英文 Nature 文章信息整理成简体中文，只输出 JSON。' },
       { role: 'user', content: prompt },
     ],
+    chat_template_kwargs: { enable_thinking: false },
     max_tokens: 512,
     temperature: 0.3,
   });

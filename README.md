@@ -18,7 +18,7 @@
 |---|---|
 | 前端 | HTML / CSS / JS → GitHub Pages |
 | 后端 | Cloudflare Workers (TypeScript) |
-| 翻译 | Cloudflare Workers AI (`llama-3.1-8b-instruct-fast`) |
+| 翻译 | Cloudflare Workers AI (`glm-4.7-flash`) |
 | 数据库 | Cloudflare D1 |
 | 定时 | Workers Cron Triggers (`0 22 * * *` UTC = 北京时间 6:00) |
 
@@ -80,7 +80,7 @@ curl -X POST https://<your-worker>.workers.dev/api/ingest \
 
 手动调用前，将刚才设置的同一个密钥放入本地环境变量 `INGEST_TOKEN`。前端公开的日报和“换一篇”功能不需要这个密钥。
 
-翻译模型通过 Worker 变量 `AI_MODEL` 配置，默认值为 `@cf/meta/llama-3.1-8b-instruct-fast`。ingest 会补译缺失或仍为英文的日报卡片；失败时保留原卡片，并在响应的 `translationFailed` 和 `errors` 字段中记录简短原因，后续 ingest 会重试。
+翻译模型通过 Worker 变量 `AI_MODEL` 配置，默认值为 `@cf/zai-org/glm-4.7-flash`。ingest 会补译缺失或仍为英文的日报卡片；失败时保留原卡片，并在响应的 `translationFailed` 和 `errors` 字段中记录简短原因，后续 ingest 会重试。
 
 ## API
 

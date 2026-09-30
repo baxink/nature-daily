@@ -2,6 +2,7 @@ import { getEnabledSources, getSourceById, type MediaSource } from './sources';
 import { normalizeArticles, type NormalizedArticle } from './normalize';
 import { fetchRss } from './fetchers/rss';
 import { fetchHtml } from './fetchers/html';
+import { fetchArticleSummary } from './fetchers/article';
 import { containsChinese, translateToChinese } from './translation';
 
 interface Env {
@@ -159,8 +160,24 @@ function normalizeSectionLabel(section: string): string {
     .join(' ');
 }
 
-async function summarizeInChinese(env: Env, article: NormalizedArticle): Promise<{ titleZh: string; summaryZh: string }> {
-  return translateToChinese(env.AI, { title: article.title, summary: article.summary || '' }, env.AI_MODEL);
+/**
+ * Resolve the English summary for an article. The listing page rarely carries
+ * the abstract, so fetch the article page and fall back to any listing text.
+ * A `null` result means the article page could not be fetched and should be
+ * retried on the next ingest; `''` means the page has no summary to show.
+ */
+async function resolveArticleSummary(article: NormalizedArticle): Promise<string | null> {
+  const listing = article.summary?.trim() || '';
+  let remote: string | null = null;
+
+  try {
+    remote = await fetchArticleSummary(article.url);
+  } catch (error) {
+    console.error(`[summary] fetch failed for ${article.url}: ${String(error)}`);
+  }
+
+  if (remote === null) return listing || null;
+  return remote || listing;
 }
 
 function buildEmptyCardRow(source: MediaSource, digestDate: string, selectedAt: string = new Date().toISOString()): DailyDigestCardRow {
@@ -343,10 +360,12 @@ async function selectDigestCardForSource(
     return upsertDigestCard(env, buildEmptyCardRow(source, digestDate));
   }
 
+  const summaryEn = await resolveArticleSummary(selected);
+
   let localized: { titleZh: string; summaryZh: string } = { titleZh: '', summaryZh: '' };
   if (translations) translations.attempted++;
   try {
-    localized = await summarizeInChinese(env, selected);
+    localized = await translateToChinese(env.AI, { title: selected.title, summary: summaryEn || '' }, env.AI_MODEL);
     if (translations) translations.succeeded++;
   } catch (error) {
     const code = translationErrorCode(error);
@@ -364,7 +383,7 @@ async function selectDigestCardForSource(
     article_id: selected.id,
     title_en: selected.title,
     title_zh: localized.titleZh,
-    summary_en: selected.summary || null,
+    summary_en: summaryEn,
     summary_zh: localized.summaryZh,
     url: selected.url,
     image_url: selected.imageUrl || null,
@@ -392,17 +411,32 @@ function needsTranslation(row: DailyDigestCardRow): boolean {
     || Boolean(row.summary_zh?.trim() && !containsChinese(row.summary_zh));
 }
 
-async function backfillDigestCardTranslation(env: Env, row: DailyDigestCardRow): Promise<{ titleZh: string; summaryZh: string } | null> {
-  if (!row.title_en?.trim()) return null;
-  const localized = await translateToChinese(env.AI, {
-    title: row.title_en,
-    summary: row.summary_en || '',
-  }, env.AI_MODEL);
+/** A null summary_en means the article summary was never fetched; '' means the
+ * article page was checked and had no summary, so it must not be retried. */
+function needsSummaryFetch(row: DailyDigestCardRow): boolean {
+  return row.summary_en === null && Boolean(row.url);
+}
+
+async function backfillDigestCard(
+  env: Env,
+  row: DailyDigestCardRow,
+  summaryEn: string | null,
+  localized: { titleZh: string; summaryZh: string },
+): Promise<boolean> {
+  if (!row.title_en?.trim()) return false;
   const result = await env.DB.prepare(
-    'UPDATE daily_digest_cards SET title_zh = ?, summary_zh = ? WHERE digest_date = ? AND source_id = ? AND article_id = ? AND selected_at = ?'
-  ).bind(localized.titleZh, localized.summaryZh || null, row.digest_date, row.source_id, row.article_id, row.selected_at).run();
+    'UPDATE daily_digest_cards SET title_zh = ?, summary_en = ?, summary_zh = ? WHERE digest_date = ? AND source_id = ? AND article_id = ? AND selected_at = ?'
+  ).bind(
+    localized.titleZh,
+    summaryEn,
+    localized.summaryZh || null,
+    row.digest_date,
+    row.source_id,
+    row.article_id,
+    row.selected_at
+  ).run();
   const changes = (result as { meta?: { changes?: number } } | undefined)?.meta?.changes;
-  return changes === 0 ? null : localized;
+  return changes !== 0;
 }
 
 async function ensureDailyDigestCards(
@@ -418,7 +452,8 @@ async function ensureDailyDigestCards(
   for (const source of sources) {
     const existingRow = rowBySourceId.get(source.id);
     if (existingRow && existingRow.is_empty === 0) {
-      if (!needsTranslation(existingRow)) continue;
+      const repairSummary = needsSummaryFetch(existingRow);
+      if (!repairSummary && !needsTranslation(existingRow)) continue;
       if (!existingRow.title_en?.trim()) {
         translations.failed++;
         translations.errors.push(`${source.id}: missing English title`);
@@ -426,12 +461,18 @@ async function ensureDailyDigestCards(
       }
       translations.attempted++;
       try {
-        const localized = await backfillDigestCardTranslation(env, existingRow);
-        if (localized) {
+        const summaryEn = repairSummary ? await fetchArticleSummary(existingRow.url || '') : existingRow.summary_en;
+        const localized = await translateToChinese(env.AI, {
+          title: existingRow.title_en,
+          summary: summaryEn || '',
+        }, env.AI_MODEL);
+        const updated = await backfillDigestCard(env, existingRow, summaryEn, localized);
+        if (updated) {
           translations.succeeded++;
           rowBySourceId.set(source.id, {
             ...existingRow,
             title_zh: localized.titleZh,
+            summary_en: summaryEn,
             summary_zh: localized.summaryZh || null,
           });
         }

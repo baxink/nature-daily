@@ -133,11 +133,11 @@ function createDbMock(state) {
         async run() {
           queries.push({ sql, params, method: 'run' });
 
-          if (sql.includes('UPDATE daily_digest_cards SET title_zh = ?, summary_zh = ?')) {
-            const [titleZh, summaryZh, digestDate, sourceId, articleId, selectedAt] = params;
+          if (sql.includes('UPDATE daily_digest_cards SET title_zh = ?, summary_en = ?, summary_zh = ?')) {
+            const [titleZh, summaryEn, summaryZh, digestDate, sourceId, articleId, selectedAt] = params;
             const row = getCard(digestDate, sourceId);
             const matches = row && row.article_id === articleId && row.selected_at === selectedAt;
-            if (matches) setCard({ ...row, title_zh: titleZh, summary_zh: summaryZh });
+            if (matches) setCard({ ...row, title_zh: titleZh, summary_en: summaryEn, summary_zh: summaryZh });
             return { success: true, meta: { changes: matches ? 1 : 0 } };
           }
 
@@ -538,9 +538,9 @@ test('ingest backfills only Chinese fields for an existing card and skips it aft
     for (const field of ['article_id', 'title_en', 'summary_en', 'url', 'image_url', 'published_at', 'selected_at']) {
       assert.equal(translated[field], original[field], `${field} must remain unchanged`);
     }
-    const update = db.queries.find(query => query.sql.includes('UPDATE daily_digest_cards SET title_zh = ?, summary_zh = ?'));
+    const update = db.queries.find(query => query.sql.includes('UPDATE daily_digest_cards SET title_zh = ?, summary_en = ?, summary_zh = ?'));
     assert.match(update.sql, /article_id = \? AND selected_at = \?/);
-    assert.deepEqual(update.params.slice(2), [today, 'nature-news', original.article_id, original.selected_at]);
+    assert.deepEqual(update.params.slice(3), [today, 'nature-news', original.article_id, original.selected_at]);
 
     const secondResult = await (await request()).json();
     assert.equal(secondResult.translationAttempted, 0);
@@ -910,6 +910,47 @@ test('failed backfill preserves the original and a later ingest retries missing 
   } });
   assert.equal(recovered.translationSucceeded, 1);
   assert.equal(cards.get('nature-main-rss').summary_zh, '真实中文摘要');
+});
+
+test('ingest fetches the real English abstract for a card stored without a summary', async () => {
+  const mod = await loadModule('../src/index.ts');
+  const today = currentDigestDate();
+  const card = createDailyCard({
+    digest_date: today, source_id: 'nature-main-rss', section: 'main',
+    article_id: 'art_correction', title_en: 'Author Correction: Proteasome-guided haem signalling',
+    title_zh: '作者更正：蛋白酶体引导的血红素信号', summary_en: null, summary_zh: null,
+    url: 'https://www.nature.com/articles/correction',
+    selected_at: '2026-09-29T22:00:00.000Z', is_empty: 0,
+  });
+  const state = {
+    dailyCardsByDate: new Map([[today, new Map([['nature-main-rss', card]])]]),
+    recentArticleIdsBySource: new Map(), mediaNameBySource: new Map(),
+  };
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url === 'https://www.nature.com/articles/correction') {
+      return new Response('<html><head><meta name="description" content="In the version of the article initially published there were errors." /></head></html>', { status: 200 });
+    }
+    return new Response('', { status: 200 });
+  };
+
+  try {
+    const response = await mod.default.fetch(new Request('https://example.com/api/ingest', {
+      method: 'POST', headers: { Authorization: 'Bearer test-token' },
+    }), { DB: createDbMock(state), AI: { async run() {
+      return { response: '{"titleZh":"作者更正：蛋白酶体引导的血红素信号","summaryZh":"在最初发表的版本中，源数据存在错误。"}' };
+    } }, INGEST_TOKEN: 'test-token' });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.translationSucceeded, 1);
+    const updated = state.dailyCardsByDate.get(today).get('nature-main-rss');
+    assert.equal(updated.summary_en, 'In the version of the article initially published there were errors.');
+    assert.equal(updated.summary_zh, '在最初发表的版本中，源数据存在错误。');
+    assert.equal(updated.title_zh, '作者更正：蛋白酶体引导的血红素信号');
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
 });
 
 test('backfill does not put an old translation on a concurrently refreshed article', async () => {

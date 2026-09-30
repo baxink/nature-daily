@@ -71,6 +71,8 @@ button {
 .meta-info,
 .story-meta,
 .section-original-title,
+.lead-original-summary,
+.section-original-summary,
 .article-link,
 .tool-link,
 .story-label-row {
@@ -161,6 +163,14 @@ button {
   font-variant: small-caps;
 }
 
+.lead-original-summary {
+  max-width: 780px;
+  margin-top: 10px;
+  color: var(--subtle);
+  font-size: 0.98rem;
+  line-height: 1.75;
+}
+
 .story-meta {
   display: flex;
   flex-wrap: wrap;
@@ -241,6 +251,13 @@ button {
   color: var(--subtle);
   font-size: 0.84rem;
   line-height: 1.6;
+}
+
+.section-original-summary {
+  margin-top: 4px;
+  color: var(--subtle);
+  font-size: 0.9rem;
+  line-height: 1.65;
 }
 
 .story-empty {

@@ -156,6 +156,7 @@ function renderLeadStory(item) {
       <div class="lead-secondary">
         <p class="english-kicker">Original title</p>
         <h3 class="lead-original-title">${escapeHtml(item.titleEn)}</h3>
+        ${item.summaryEn ? `<p class="lead-original-summary">${escapeHtml(item.summaryEn)}</p>` : ''}
       </div>
       <div class="story-meta">
         <span>发布时间 ${escapeHtml(formatDate(item.publishedAt))}</span>
@@ -186,6 +187,7 @@ function renderSectionStory(item) {
         <h3 class="section-headline">${escapeHtml(item.title)}</h3>
         <p class="section-summary">${escapeHtml(item.summary)}</p>
         <p class="section-original-title">${escapeHtml(item.titleEn)}</p>
+        ${item.summaryEn ? `<p class="section-original-summary">${escapeHtml(item.summaryEn)}</p>` : ''}
       `}
       <div class="section-tools">
         ${item.isEmpty || !articleUrl

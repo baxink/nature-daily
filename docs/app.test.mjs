@@ -77,6 +77,49 @@ test('renderDigest puts nature-main-rss into the lead slot and other cards into 
   assert.match(sectionItems[0].textContent, /新闻栏目/u);
 });
 
+test('renderDigest shows bilingual summaries for the lead and section stories', () => {
+  setupDom();
+  const app = createDigestApp({
+    apiBase: 'https://example.com',
+    digestRoot: document.getElementById('digestGrid'),
+    metaRoot: document.getElementById('metaInfo'),
+    fetchImpl: async () => {
+      throw new Error('not used');
+    },
+  });
+
+  app.renderDigest(samplePayload());
+
+  const lead = document.querySelector('[data-role="lead-story"]');
+  const section = document.querySelector('[data-role="section-story"]');
+
+  assert.equal(lead.querySelector('.lead-summary').textContent, '这是头条摘要。');
+  assert.equal(lead.querySelector('.lead-original-summary').textContent, 'Lead summary.');
+  assert.equal(section.querySelector('.section-summary').textContent, '新闻摘要。');
+  assert.equal(section.querySelector('.section-original-summary').textContent, 'News summary.');
+});
+
+test('renderDigest omits the English summary when the article has none', () => {
+  setupDom();
+  const app = createDigestApp({
+    apiBase: 'https://example.com',
+    digestRoot: document.getElementById('digestGrid'),
+    metaRoot: document.getElementById('metaInfo'),
+    fetchImpl: async () => {
+      throw new Error('not used');
+    },
+  });
+
+  const payload = samplePayload();
+  payload.cards[0].summaryEn = '';
+  payload.cards[1].summaryEn = '';
+
+  app.renderDigest(payload);
+
+  assert.equal(document.querySelectorAll('.lead-original-summary').length, 0);
+  assert.equal(document.querySelectorAll('.section-original-summary').length, 0);
+});
+
 test('renderDigest keeps the lead slot visible when the lead story is empty', () => {
   setupDom();
   const app = createDigestApp({

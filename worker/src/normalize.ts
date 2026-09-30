@@ -15,7 +15,7 @@ export interface NormalizedArticle {
   summary: string;
   url: string;
   imageUrl: string;
-  publishedAt: string;
+  publishedAt: string | null;
   fetchedAt: string;
   lang: string;
 }
@@ -31,14 +31,14 @@ function generateId(sourceId: string, url: string): string {
   return `art_${Math.abs(hash).toString(36)}`;
 }
 
-function parseDate(dateStr?: string): string {
-  if (!dateStr) return new Date().toISOString();
+function parseDate(dateStr?: string): string | null {
+  if (!dateStr) return null;
   try {
     const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return new Date().toISOString();
+    if (isNaN(d.getTime())) return null;
     return d.toISOString();
   } catch {
-    return new Date().toISOString();
+    return null;
   }
 }
 

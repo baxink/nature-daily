@@ -8,6 +8,7 @@ interface Env {
   AI: Ai;
   FRONTEND_ORIGIN: string;
   FREE_API_KEY?: string;
+  INGEST_TOKEN?: string;
 }
 
 interface IngestRow {
@@ -102,11 +103,11 @@ function hasDisallowedOrigin(request: Request, env: Env): boolean {
   return request.headers.has('Origin') && !getCorsOrigin(request, env);
 }
 
-function corsHeaders(origin: string | null): Record<string, string> {
+function corsHeaders(origin: string | null, cacheControl = 'public, max-age=300'): Record<string, string> {
   const headers: Record<string, string> = {
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Cache-Control': 'public, max-age=300',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Cache-Control': cacheControl,
     'Vary': 'Origin',
   };
 
@@ -122,13 +123,25 @@ function jsonResponse(request: Request, env: Env, body: unknown, status: number 
     status,
     headers: {
       'Content-Type': 'application/json',
-      ...corsHeaders(getCorsOrigin(request, env)),
+      ...corsHeaders(getCorsOrigin(request, env), request.method !== 'GET' || status >= 400 ? 'no-store' : 'public, max-age=300'),
     },
   });
 }
 
 function forbiddenResponse(request: Request, env: Env): Response {
   return jsonResponse(request, env, { error: 'Forbidden origin' }, 403);
+}
+
+function ingestAuthorizationError(request: Request, env: Env): Response | null {
+  if (!env.INGEST_TOKEN) {
+    return jsonResponse(request, env, { error: 'Ingest is not configured' }, 503);
+  }
+
+  if (request.headers.get('Authorization') !== `Bearer ${env.INGEST_TOKEN}`) {
+    return jsonResponse(request, env, { error: 'Unauthorized' }, 401);
+  }
+
+  return null;
 }
 
 function toDigestDate(date: Date = new Date()): string {
@@ -351,7 +364,7 @@ async function selectDigestCardForSource(
   articles: NormalizedArticle[],
   digestDate: string,
   excludeIds: Set<string> = new Set()
-): Promise<DailyDigestCardRow> {
+): Promise<DailyDigestCardRow | null> {
   const recentRows = await env.DB.prepare(
     'SELECT article_id FROM daily_digest_cards WHERE source_id = ? AND is_empty = 0 ORDER BY digest_date DESC LIMIT 14'
   ).bind(source.id).all<{ article_id: string | null }>();
@@ -360,10 +373,14 @@ async function selectDigestCardForSource(
     [...recentRows.results.map(row => row.article_id).filter((id): id is string => Boolean(id)), ...excludeIds]
   );
 
-  const candidates = [...articles].sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt));
-  const selected = candidates.find(article => !recentIds.has(article.id)) || candidates[0];
+  const candidates = [...articles].sort((a, b) =>
+    (Date.parse(b.publishedAt || '') || 0) - (Date.parse(a.publishedAt || '') || 0)
+  );
+  const eligibleCandidates = candidates.filter(article => !excludeIds.has(article.id));
+  const selected = eligibleCandidates.find(article => !recentIds.has(article.id)) || eligibleCandidates[0];
 
   if (!selected) {
+    if (candidates.length > 0) return null;
     return upsertDigestCard(env, buildEmptyCardRow(source, digestDate));
   }
 
@@ -396,7 +413,8 @@ async function ensureDailyDigestCards(
   const rowBySourceId = new Map(existingRows.map(row => [row.source_id, row]));
 
   for (const source of sources) {
-    if (rowBySourceId.has(source.id)) continue;
+    const existingRow = rowBySourceId.get(source.id);
+    if (existingRow && existingRow.is_empty === 0) continue;
 
     const row = await selectDigestCardForSource(
       env,
@@ -404,7 +422,7 @@ async function ensureDailyDigestCards(
       articlesBySource.get(source.id) || [],
       digestDate
     );
-    rowBySourceId.set(source.id, row);
+    if (row) rowBySourceId.set(source.id, row);
   }
 
   return sources
@@ -557,7 +575,7 @@ async function handleRefresh(env: Env, request: Request): Promise<Response> {
   if (sourceArticles.length === 0 && existingCard && existingCard.is_empty === 0) {
     card = existingCard;
   } else {
-    card = await selectDigestCardForSource(env, source, sourceArticles, today, excludeIds);
+    card = await selectDigestCardForSource(env, source, sourceArticles, today, excludeIds) || existingCard || buildEmptyCardRow(source, today);
   }
 
   return jsonResponse(request, env, mapDigestCardRow(source, card));
@@ -590,6 +608,9 @@ export default {
         return forbiddenResponse(request, env);
       }
 
+      const authorizationError = ingestAuthorizationError(request, env);
+      if (authorizationError) return authorizationError;
+
       return handleIngest(env, request);
     }
 
@@ -601,7 +622,7 @@ export default {
       return handleRefresh(env, request);
     }
 
-    return new Response('Not Found', { status: 404 });
+    return new Response('Not Found', { status: 404, headers: { 'Cache-Control': 'no-store' } });
   },
 
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {

@@ -11,9 +11,26 @@ const SOURCE_SPECS = [
 ];
 
 function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str || '';
-  return div.innerHTML;
+  return String(str ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[char]);
+}
+
+function safeArticleUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) {
+    return '';
+  }
+
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
+  } catch {
+    return '';
+  }
 }
 
 function formatDate(isoStr) {
@@ -126,6 +143,8 @@ function renderLeadStory(item) {
     `;
   }
 
+  const articleUrl = safeArticleUrl(item.url);
+
   return `
     <article class="lead-story-shell" data-role="lead-story">
       <div class="story-label-row">
@@ -143,7 +162,9 @@ function renderLeadStory(item) {
         <span>${escapeHtml(item.mediaName)}</span>
       </div>
       <div class="story-tools">
-        <a class="article-link article-link-primary" href="${item.url}" target="_blank" rel="noopener noreferrer">阅读 Nature 原文</a>
+        ${articleUrl
+          ? `<a class="article-link article-link-primary" href="${escapeHtml(articleUrl)}" target="_blank" rel="noopener noreferrer">阅读 Nature 原文</a>`
+          : '<span class="article-link article-link-muted">暂无原文</span>'}
         <button class="tool-link refresh-link" data-source-id="${escapeHtml(item.sourceId)}" type="button">换一篇</button>
       </div>
     </article>
@@ -151,6 +172,7 @@ function renderLeadStory(item) {
 }
 
 function renderSectionStory(item) {
+  const articleUrl = safeArticleUrl(item.url);
   return `
     <article class="section-story${item.isEmpty ? ' section-story-empty' : ''}" data-role="section-story">
       <div class="story-label-row">
@@ -166,9 +188,9 @@ function renderSectionStory(item) {
         <p class="section-original-title">${escapeHtml(item.titleEn)}</p>
       `}
       <div class="section-tools">
-        ${item.isEmpty
+        ${item.isEmpty || !articleUrl
           ? '<span class="article-link article-link-muted">暂无原文</span>'
-          : `<a class="article-link" href="${item.url}" target="_blank" rel="noopener noreferrer">查看原文</a>`}
+          : `<a class="article-link" href="${escapeHtml(articleUrl)}" target="_blank" rel="noopener noreferrer">查看原文</a>`}
         <button class="tool-link refresh-link" data-source-id="${escapeHtml(item.sourceId)}" type="button">换一篇</button>
       </div>
     </article>

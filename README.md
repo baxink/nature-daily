@@ -60,11 +60,25 @@ cd worker
 npx wrangler deploy
 ```
 
-### 4. 手动触发一次抓取
+### 4. 配置手动抓取密钥
+
+`/api/ingest` 是运维接口，需要 Bearer token。手动调用前先设置 Worker secret；未设置时接口会 fail closed，定时抓取仍可正常运行。
 
 ```bash
-curl -X POST https://<your-worker>.workers.dev/api/ingest
+cd worker
+npx wrangler secret put INGEST_TOKEN
 ```
+
+按提示输入一段随机密钥，并将其保存在安全位置。
+
+### 5. 手动触发一次抓取
+
+```bash
+curl -X POST https://<your-worker>.workers.dev/api/ingest \
+  -H "Authorization: Bearer $INGEST_TOKEN"
+```
+
+手动调用前，将刚才设置的同一个密钥放入本地环境变量 `INGEST_TOKEN`。前端公开的日报和“换一篇”功能不需要这个密钥。
 
 ## API
 

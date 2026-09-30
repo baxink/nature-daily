@@ -125,6 +125,53 @@ test('page render exposes separate lead and section anchors', () => {
   assert.ok(document.querySelector('.section-columns'));
 });
 
+test('renderDigest rejects unsafe article URL protocols in lead and section stories', () => {
+  setupDom();
+  const app = createDigestApp({
+    apiBase: 'https://example.com',
+    digestRoot: document.getElementById('digestGrid'),
+    metaRoot: document.getElementById('metaInfo'),
+    fetchImpl: async () => {
+      throw new Error('not used');
+    },
+  });
+  const payload = samplePayload();
+  payload.cards[0].url = 'javascript:alert(1)';
+  payload.cards[1].url = 'data:text/html,<script>alert(1)</script>';
+
+  app.renderDigest(payload);
+
+  assert.equal(document.querySelectorAll('.article-link[href]').length, 0);
+  assert.equal(document.querySelectorAll('.article-link-muted').length, 2);
+});
+
+test('renderDigest escapes attribute quotes and keeps valid HTTP article links', () => {
+  setupDom();
+  const app = createDigestApp({
+    apiBase: 'https://example.com',
+    digestRoot: document.getElementById('digestGrid'),
+    metaRoot: document.getElementById('metaInfo'),
+    fetchImpl: async () => {
+      throw new Error('not used');
+    },
+  });
+  const payload = samplePayload();
+  const injectedSourceId = 'nature-news" onmouseover="alert(1)';
+  payload.cards[1].sourceId = injectedSourceId;
+  payload.cards[1].url = 'http://example.com/news';
+
+  app.renderDigest(payload);
+
+  const newsStory = [...document.querySelectorAll('[data-role="section-story"]')]
+    .find((story) => story.querySelector('.section-headline')?.textContent === '新闻栏目');
+  const refreshButton = newsStory.querySelector('.refresh-link');
+  const httpLink = newsStory.querySelector('a.article-link');
+
+  assert.equal(refreshButton.getAttribute('data-source-id'), injectedSourceId);
+  assert.equal(refreshButton.hasAttribute('onmouseover'), false);
+  assert.equal(httpLink.href, 'http://example.com/news');
+});
+
 test('mergeCardUpdate replaces only the matching source item', () => {
   setupDom();
   const app = createDigestApp({

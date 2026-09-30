@@ -219,6 +219,55 @@ test('rejects write requests from untrusted origins', async () => {
   const response = await mod.default.fetch(request, env);
   assert.equal(response.status, 403);
   assert.match(await response.text(), /Forbidden/);
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+});
+
+test('requires the configured bearer token for manual ingest regardless of Origin', async () => {
+  const mod = await loadModule('../src/index.ts');
+  const env = {
+    DB: { prepare() { throw new Error('DB should not be used for unauthorized ingest'); } },
+    AI: { run() { throw new Error('AI should not be used for unauthorized ingest'); } },
+    FRONTEND_ORIGIN: 'https://baxink.github.io',
+    INGEST_TOKEN: 'secret-ingest-token',
+  };
+
+  for (const headers of [{}, { Origin: 'https://baxink.github.io' }]) {
+    const response = await mod.default.fetch(new Request('https://example.com/api/ingest', {
+      method: 'POST',
+      headers,
+    }), env);
+    assert.equal(response.status, 401);
+    assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  }
+
+  const unconfiguredResponse = await mod.default.fetch(new Request('https://example.com/api/ingest', {
+    method: 'POST',
+  }), { ...env, INGEST_TOKEN: undefined });
+  assert.equal(unconfiguredResponse.status, 503);
+  assert.equal(unconfiguredResponse.headers.get('Cache-Control'), 'no-store');
+
+  const state = {
+    dailyCardsByDate: new Map(),
+    recentArticleIdsBySource: new Map(),
+    mediaNameBySource: new Map(),
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('<html><body></body></html>', { status: 200 });
+  try {
+    const authorizedResponse = await mod.default.fetch(new Request('https://example.com/api/ingest', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer secret-ingest-token' },
+    }), {
+      ...env,
+      DB: createDbMock(state),
+    });
+    assert.equal(authorizedResponse.status, 200);
+    const payload = await authorizedResponse.json();
+    assert.equal(payload.totalSources, 7);
+    assert.equal(payload.digestCreated, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('reports the configured source count in meta even if the seeded table is stale', async () => {
@@ -353,6 +402,75 @@ test('returns ordered daily cards and fills missing sources with empty placehold
   assert.equal(payload.cards[1].title, '现有标题');
   assert.equal(payload.cards[6].isEmpty, true);
   assert.equal(payload.cards[6].title, '');
+});
+
+test('ingest replaces a prior empty placeholder when a source later has an article', async () => {
+  const mod = await loadModule('../src/index.ts');
+  const today = currentDigestDate();
+  const placeholder = createDailyCard({
+      digest_date: today,
+      source_id: 'nature-main-rss',
+      section: 'main',
+      article_id: null,
+      title_en: null,
+      title_zh: null,
+      summary_en: null,
+      summary_zh: null,
+      url: null,
+      image_url: '',
+      published_at: null,
+      selected_at: '2026-05-11T00:00:00.000Z',
+      is_empty: 1,
+    });
+  const state = {
+    dailyCardsByDate: new Map([[today, new Map([
+      ['nature-main-rss', placeholder],
+      ['nature-news', createDailyCard({
+        digest_date: today,
+        source_id: 'nature-news',
+        section: 'news',
+        article_id: 'existing-real-card',
+        title_en: 'Keep this title',
+        title_zh: '保留这篇日报',
+        summary_en: 'Keep this summary',
+        summary_zh: '保留摘要',
+        url: 'https://www.nature.com/articles/keep',
+        published_at: '2026-05-10T00:00:00.000Z',
+        selected_at: '2026-05-10T00:00:00.000Z',
+        is_empty: 0,
+      })],
+    ])]]),
+    recentArticleIdsBySource: new Map(),
+    mediaNameBySource: new Map([['nature-main-rss', 'Nature']]),
+  };
+  const db = createDbMock(state);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url === 'https://www.nature.com/nature.rss') {
+      return new Response(`<?xml version="1.0"?><rss version="2.0"><channel><item>
+        <title>Recovered article</title><link>https://www.nature.com/articles/recovered</link>
+        <description>Article summary</description><pubDate>Mon, 11 May 2026 00:00:00 GMT</pubDate>
+      </item></channel></rss>`, { status: 200 });
+    }
+    return new Response('<html><body></body></html>', { status: 200 });
+  };
+
+  try {
+    await mod.default.scheduled({}, {
+      DB: db,
+      AI: { run() { return { response: '{"titleZh":"恢复标题","summaryZh":"恢复摘要"}' }; } },
+      FRONTEND_ORIGIN: 'https://baxink.github.io',
+    });
+    const recovered = state.dailyCardsByDate.get(today).get('nature-main-rss');
+    assert.equal(recovered.is_empty, 0);
+    assert.equal(recovered.title_en, 'Recovered article');
+    const preserved = state.dailyCardsByDate.get(today).get('nature-news');
+    assert.equal(preserved.article_id, 'existing-real-card');
+    assert.equal(preserved.title_zh, '保留这篇日报');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('falls back to the legacy single digest row when card rows are not ready yet', async () => {
@@ -529,6 +647,109 @@ test('refreshes only the targeted source card', async () => {
     assert.equal(payload.isEmpty, false);
     assert.equal(state.dailyCardsByDate.get(today).get('nature-news').url, 'https://www.nature.com/articles/news');
     assert.equal(state.dailyCardsByDate.get(today).get('nature-main-rss').url, 'https://www.nature.com/articles/new-main');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('keeps the current card when refresh finds no alternative article', async () => {
+  const mod = await loadModule('../src/index.ts');
+  const today = currentDigestDate();
+  const originalCard = createDailyCard({
+    digest_date: today,
+    source_id: 'nature-main-rss',
+    section: 'main',
+    article_id: 'art_jmzix1',
+    title_en: 'Only article',
+    title_zh: '唯一文章',
+    summary_en: 'Existing summary',
+    summary_zh: '现有摘要',
+    url: 'https://www.nature.com/articles/only',
+    image_url: '',
+    published_at: '2026-05-11T00:00:00.000Z',
+    selected_at: '2026-05-11T00:00:00.000Z',
+    is_empty: 0,
+    media_name: 'Nature',
+  });
+  const state = {
+    dailyCardsByDate: new Map([[today, new Map([['nature-main-rss', originalCard]])]]),
+    recentArticleIdsBySource: new Map(),
+    mediaNameBySource: new Map([['nature-main-rss', 'Nature']]),
+  };
+  const originalFetch = globalThis.fetch;
+  let aiCalls = 0;
+  globalThis.fetch = async () => new Response(`<?xml version="1.0"?><rss version="2.0"><channel><item>
+    <title>Only article</title><link>https://www.nature.com/articles/only</link>
+    <description>Existing summary</description><pubDate>Mon, 11 May 2026 00:00:00 GMT</pubDate>
+  </item></channel></rss>`, { status: 200 });
+
+  try {
+    const response = await mod.default.fetch(new Request('https://example.com/api/daily/refresh', {
+      method: 'POST',
+      headers: { Origin: 'https://baxink.github.io', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceId: 'nature-main-rss' }),
+    }), {
+      DB: createDbMock(state),
+      AI: { run() { aiCalls++; return { response: '{"titleZh":"唯一文章","summaryZh":"现有摘要"}' }; } },
+      FRONTEND_ORIGIN: 'https://baxink.github.io',
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('Cache-Control'), 'no-store');
+    const payload = await response.json();
+    assert.equal(payload.url, originalCard.url);
+    assert.equal(payload.title, originalCard.title_zh);
+    assert.equal(state.dailyCardsByDate.get(today).get('nature-main-rss').article_id, 'art_jmzix1');
+    assert.equal(aiCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refresh excludes the current article but falls back to an older recently used candidate', async () => {
+  const mod = await loadModule('../src/index.ts');
+  const today = currentDigestDate();
+  const state = {
+    dailyCardsByDate: new Map([[today, new Map([['nature-main-rss', createDailyCard({
+      digest_date: today,
+      source_id: 'nature-main-rss',
+      section: 'main',
+      article_id: 'art_a0ob28',
+      title_en: 'Current article',
+      title_zh: '当前文章',
+      summary_en: 'Current summary',
+      summary_zh: '当前摘要',
+      url: 'https://www.nature.com/articles/current',
+      published_at: '2026-05-12T00:00:00.000Z',
+      selected_at: '2026-05-12T00:00:00.000Z',
+      is_empty: 0,
+    })]])]]),
+    recentArticleIdsBySource: new Map([['nature-main-rss', [{ article_id: 'art_nvr1ul' }]]]),
+    mediaNameBySource: new Map([['nature-main-rss', 'Nature']]),
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(`<?xml version="1.0"?><rss version="2.0"><channel>
+    <item><title>Current article</title><link>https://www.nature.com/articles/current</link>
+      <pubDate>Tue, 12 May 2026 00:00:00 GMT</pubDate></item>
+    <item><title>Historical article</title><link>https://www.nature.com/articles/historical</link>
+      <pubDate>Mon, 11 May 2026 00:00:00 GMT</pubDate></item>
+  </channel></rss>`, { status: 200 });
+
+  try {
+    const response = await mod.default.fetch(new Request('https://example.com/api/daily/refresh', {
+      method: 'POST',
+      headers: { Origin: 'https://baxink.github.io', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceId: 'nature-main-rss' }),
+    }), {
+      DB: createDbMock(state),
+      AI: { run() { return { response: '{"titleZh":"历史文章","summaryZh":"历史摘要"}' }; } },
+      FRONTEND_ORIGIN: 'https://baxink.github.io',
+    });
+
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.url, 'https://www.nature.com/articles/historical');
+    assert.equal(state.dailyCardsByDate.get(today).get('nature-main-rss').article_id, 'art_nvr1ul');
   } finally {
     globalThis.fetch = originalFetch;
   }

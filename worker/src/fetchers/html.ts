@@ -32,7 +32,10 @@ function normalizeUrl(href: string, baseUrl: string): string {
 function isNatureArticle(url: string): boolean {
   try {
     const parsed = new URL(url);
-    return parsed.hostname.endsWith('nature.com') && /\/articles\//.test(parsed.pathname);
+    const hostname = parsed.hostname.toLowerCase();
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      (hostname === 'nature.com' || hostname.endsWith('.nature.com')) &&
+      /\/articles\//.test(parsed.pathname);
   } catch {
     return false;
   }
@@ -41,12 +44,6 @@ function isNatureArticle(url: string): boolean {
 function inferTitle(anchorHtml: string): string {
   const title = stripHtml(anchorHtml);
   return title.replace(/^Nature\s+/, '').trim();
-}
-
-function inferPublishedAtFromId(url: string): string | undefined {
-  const match = url.match(/-(20\d{2})-(\d{2})-(\d{5})-[a-z]$/i);
-  if (!match) return undefined;
-  return `${match[1]}-${match[2]}-01T00:00:00.000Z`;
 }
 
 function getHtmlAttribute(tag: string, name: string): string {
@@ -112,6 +109,53 @@ function extractPublishedAtFromHtml(html: string): string | undefined {
   return undefined;
 }
 
+function isArticleCardTag(tag: string, attributes: string): boolean {
+  if (tag === 'article' || tag === 'li') return true;
+  if (tag !== 'div' && tag !== 'section') return false;
+  const className = getHtmlAttribute(attributes, 'class');
+  return /(?:^|[-_\s])(?:article|card|story|result)(?:$|[-_\s])/i.test(className);
+}
+
+/** Return the nearest recognizable card containing this link, including metadata
+ * that appears before or after the link. If markup provides no card boundary,
+ * return only the link so metadata from neighboring entries cannot leak in. */
+function getArticleCardHtml(html: string, anchorStart: number, anchorEnd: number): string {
+  const tagRegex = /<\/?([a-z][\w:-]*)\b[^>]*>/gi;
+  const stack: Array<{ tag: string; start: number; card: boolean }> = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = tagRegex.exec(html)) !== null && match.index < anchorStart) {
+    const rawTag = match[0];
+    const tag = match[1].toLowerCase();
+    if (rawTag.startsWith('</')) {
+      for (let i = stack.length - 1; i >= 0; i -= 1) {
+        if (stack[i].tag !== tag) continue;
+        stack.splice(i);
+        break;
+      }
+    } else if (!/\/\s*>$/.test(rawTag) && !['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'].includes(tag)) {
+      stack.push({ tag, start: match.index, card: isArticleCardTag(tag, rawTag) });
+    }
+  }
+
+  const nearestCard = [...stack].reverse().find((element) => element.card);
+  if (!nearestCard) return html.slice(anchorStart, anchorEnd);
+
+  const sameTagRegex = new RegExp(`<\\/?${nearestCard.tag}\\b[^>]*>`, 'ig');
+  sameTagRegex.lastIndex = nearestCard.start;
+  let depth = 0;
+  let end = anchorEnd;
+  while ((match = sameTagRegex.exec(html)) !== null) {
+    if (match[0].startsWith('</')) depth -= 1;
+    else if (!/\/\s*>$/.test(match[0])) depth += 1;
+    if (depth === 0) {
+      end = sameTagRegex.lastIndex;
+      break;
+    }
+  }
+  return html.slice(nearestCard.start, end);
+}
+
 export async function fetchHtml(url: string, timeoutMs: number = 10000): Promise<RawArticle[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -140,15 +184,13 @@ export async function fetchHtml(url: string, timeoutMs: number = 10000): Promise
       const title = inferTitle(match[2]);
       if (title.length < 12) continue;
 
-      const contextStart = Math.max(0, match.index - 800);
-      const contextEnd = Math.min(text.length, anchorRegex.lastIndex + 1200);
-      const context = text.slice(contextStart, contextEnd);
+      const card = getArticleCardHtml(text, match.index, anchorRegex.lastIndex);
 
       seen.add(link);
       items.push({
         title,
         link,
-        pubDate: extractPublishedAtFromHtml(context) || inferPublishedAtFromId(link),
+        pubDate: extractPublishedAtFromHtml(card),
       });
     }
 

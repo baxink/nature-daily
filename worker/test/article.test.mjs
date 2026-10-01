@@ -106,3 +106,43 @@ test('fetchArticleSummary returns null on failure and an empty string when no su
     globalThis.fetch = originalFetch;
   }
 });
+
+
+test('preserves encoded comparison symbols in article metadata and body', async () => {
+  const { extractArticleSummary } = await loadModule('../src/fetchers/article.ts');
+  assert.equal(extractArticleSummary('<meta name="description" content="Cells grow when 2 &lt; pH &lt; 5 and pressure &gt; 10 units.">'),
+    'Cells grow when 2 < pH < 5 and pressure > 10 units.');
+  assert.equal(extractArticleSummary('<div class="c-article-body"><div class="c-article-section__content"><p>A literal marker &lt;report&gt; is part of this scientific description.</p></div></div>'),
+    'A literal marker <report> is part of this scientific description.');
+});
+
+test('does not read sections outside the article body', async () => {
+  const { extractArticleSummary } = await loadModule('../src/fetchers/article.ts');
+  const outside = '<aside><div class="c-article-section__content">This unrelated promotional content is longer than forty characters and is not an abstract.</div></aside>';
+  assert.equal(extractArticleSummary('<div class="c-article-body"></div>' + outside), '');
+  assert.equal(extractArticleSummary(outside), '');
+});
+
+test('avoids Nature cookie redirects while preserving the stored article URL', async () => {
+  const { fetchArticleSummary } = await loadModule('../src/fetchers/article.ts');
+  const savedFetch = globalThis.fetch;
+  let requested;
+  globalThis.fetch = async (url) => { requested = new URL(url); return new Response('<meta name="description" content="Public abstract.">'); };
+  try {
+    await fetchArticleSummary('https://www.nature.com/articles/x?view=full');
+    assert.equal(requested.searchParams.get('error'), 'cookies_not_supported');
+    assert.equal(requested.searchParams.get('view'), 'full');
+    await fetchArticleSummary('https://example.com/articles/x');
+    assert.equal(requested.search, '');
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+
+test('uses the article description when Nature repeats a generic SEO description', async () => {
+  const { extractArticleSummary } = await loadModule('../src/fetchers/article.ts');
+  assert.equal(extractArticleSummary(`
+    <meta name="description" content="Hear the biggest stories from the world of science.">
+    <meta name="dc.description" content="Butterfly markings mislead the eye during takeoffs.">
+    <meta name="description" content="Butterfly markings mislead the eye during takeoffs.">
+  `), 'Butterfly markings mislead the eye during takeoffs.');
+});

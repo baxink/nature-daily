@@ -929,7 +929,7 @@ test('ingest fetches the real English abstract for a card stored without a summa
   const savedFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const url = typeof input === 'string' ? input : input.url;
-    if (url === 'https://www.nature.com/articles/correction') {
+    if (new URL(url).pathname === '/articles/correction') {
       return new Response('<html><head><meta name="description" content="In the version of the article initially published there were errors." /></head></html>', { status: 200 });
     }
     return new Response('', { status: 200 });
@@ -964,4 +964,74 @@ test('backfill does not put an old translation on a concurrently refreshed artic
   } });
   assert.deepEqual(cards.get('nature-main-rss'), replacement);
   assert.equal(result.translationSucceeded, 0);
+});
+
+
+test('failed summary fetching preserves Chinese fields and retries without a wasted AI call', async () => {
+  const mod = await loadModule('../src/index.ts');
+  const state = translationState({ title_zh: '已有中文标题', summary_en: null, summary_zh: '已有中文摘要' });
+  const cards = state.dailyCardsByDate.get(currentDigestDate());
+  const before = { ...cards.get('nature-main-rss') };
+  const savedFetch = globalThis.fetch;
+  let recovered = false;
+  let calls = 0;
+  globalThis.fetch = async (input) => {
+    const url = new URL(typeof input === 'string' ? input : input.url);
+    if (url.pathname === '/articles/original') return recovered
+      ? new Response('<meta name="description" content="Recovered English summary.">')
+      : new Response('unavailable', { status: 503 });
+    return new Response('');
+  };
+  const env = { DB: createDbMock(state), INGEST_TOKEN: 'test-token', AI: { async run() {
+    calls++; return { response: { titleZh: '已有中文标题', summaryZh: '恢复的中文摘要' } };
+  } } };
+  const ingest = () => mod.default.fetch(new Request('https://example.com/api/ingest', {
+    method: 'POST', headers: { Authorization: 'Bearer test-token' },
+  }), env);
+  try {
+    const failed = await (await ingest()).json();
+    assert.equal(calls, 0);
+    assert.equal(failed.translationFailed, 1);
+    assert.deepEqual(cards.get('nature-main-rss'), before);
+    recovered = true;
+    const result = await (await ingest()).json();
+    assert.equal(result.translationSucceeded, 1);
+    assert.equal(calls, 1);
+    assert.equal(cards.get('nature-main-rss').summary_en, 'Recovered English summary.');
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+
+test('a complete seven-source digest stays under the free external-request budget with Nature redirects', async () => {
+  const mod = await loadModule('../src/index.ts');
+  const state = { dailyCardsByDate: new Map(), recentArticleIdsBySource: new Map(), mediaNameBySource: new Map() };
+  const savedFetch = globalThis.fetch;
+  let externalRequests = 0;
+  const spend = (count) => { externalRequests += count; if (externalRequests > 50) throw new Error('Too many subrequests'); };
+  globalThis.fetch = async (input) => {
+    const url = new URL(typeof input === 'string' ? input : input.url);
+    if (url.pathname.startsWith('/articles/')) {
+      spend(url.searchParams.get('error') === 'cookies_not_supported' ? 1 : 4);
+      return new Response('<meta name="description" content="A real scientific article summary.">');
+    }
+    if (url.pathname.endsWith('.rss')) {
+      spend(1);
+      return new Response(`<rss><channel><item><title>A new scientific discovery</title><link>https://www.nature.com/articles/${url.pathname.includes('natrevbioeng') ? 'bioengineering' : 'main'}</link></item></channel></rss>`);
+    }
+    spend(4);
+    return new Response(`<article><a href="/articles/${url.pathname.slice(1).replaceAll('/', '-')}">A new scientific discovery</a></article>`);
+  };
+  try {
+    const response = await mod.default.fetch(new Request('https://example.com/api/ingest', {
+      method: 'POST', headers: { Authorization: 'Bearer test-token' },
+    }), { DB: createDbMock(state), INGEST_TOKEN: 'test-token', AI: { async run() {
+      spend(1); return { response: { titleZh: '一项新的科学发现', summaryZh: '一篇真实的科学文章摘要。' } };
+    } } });
+    const result = await response.json();
+    assert.equal(result.successCount, 7);
+    assert.equal(result.translationSucceeded, 7);
+    assert.equal(result.translationFailed, 0);
+    assert.ok(externalRequests <= 50);
+    assert.equal(state.dailyCardsByDate.get(currentDigestDate()).size, 7);
+  } finally { globalThis.fetch = savedFetch; }
 });

@@ -14,10 +14,10 @@ function decodeHtml(value: string): string {
 }
 
 function stripHtml(html: string): string {
-  return decodeHtml(html)
+  return decodeHtml(html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]*>/g, ' ')
+    .replace(/<[^>]*>/g, ' '))
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -29,7 +29,7 @@ function escapeRegExp(value: string): string {
 function getAttribute(tag: string, name: string): string {
   const match = tag.match(new RegExp(`\\b${escapeRegExp(name)}\\s*=\\s*("([^"]*)"|'([^']*)')`, 'i'));
   if (!match) return '';
-  return decodeHtml((match[2] ?? match[3] ?? '').trim());
+  return (match[2] ?? match[3] ?? '').trim();
 }
 
 function truncate(value: string): string {
@@ -58,7 +58,9 @@ function metaValues(html: string): Map<string, string> {
       getAttribute(tag, 'property') ||
       getAttribute(tag, 'itemprop')
     ).toLowerCase();
-    if (!key || values.has(key)) continue;
+    if (!key) continue;
+    // Nature may repeat description: the later bibliographic tag carries the
+    // article standfirst, while the earlier SEO tag can be a generic teaser.
 
     const content = stripHtml(getAttribute(tag, 'content'));
     if (content) values.set(key, content);
@@ -103,7 +105,8 @@ function findClosingDiv(html: string, openIndex: number): number {
 
 function extractBodySummary(html: string): string {
   const bodyMatch = /<div\b[^>]*\bclass="[^"]*\bc-article-body\b[^"]*"[^>]*>/i.exec(html);
-  const scope = bodyMatch ? html.slice(bodyMatch.index + bodyMatch[0].length) : html;
+  if (!bodyMatch) return '';
+  const scope = html.slice(bodyMatch.index + bodyMatch[0].length, findClosingDiv(html, bodyMatch.index));
   const sectionRegex = /<div\b[^>]*\bclass="[^"]*\bc-article-section__content\b[^"]*"[^>]*>/gi;
   let match: RegExpExecArray | null;
 
@@ -140,7 +143,13 @@ export async function fetchArticleSummary(url: string, timeoutMs: number = 10000
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const res = await fetch(url, {
+    const requestUrl = new URL(url);
+    // Nature's public no-cookie page avoids three identity-provider redirects
+    // per article, keeping seven summaries within the Worker request budget.
+    if (requestUrl.hostname === 'www.nature.com' || requestUrl.hostname === 'nature.com') {
+      requestUrl.searchParams.set('error', 'cookies_not_supported');
+    }
+    const res = await fetch(requestUrl.toString(), {
       signal: controller.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; NatureDaily/1.0)',

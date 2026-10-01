@@ -462,6 +462,9 @@ async function ensureDailyDigestCards(
       translations.attempted++;
       try {
         const summaryEn = repairSummary ? await fetchArticleSummary(existingRow.url || '') : existingRow.summary_en;
+        if (repairSummary && summaryEn === null) {
+          throw new Error('Article summary fetch failed; existing translation preserved');
+        }
         const localized = await translateToChinese(env.AI, {
           title: existingRow.title_en,
           summary: summaryEn || '',

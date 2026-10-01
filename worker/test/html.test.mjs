@@ -77,3 +77,17 @@ test('rejects lookalike hosts and non-HTTP article URLs', async () => {
 
   assert.deepEqual(articles.map(({ link }) => link), ['https://nature.com/articles/valid']);
 });
+
+
+test('reads only the heading when a Nature article link wraps a whole card', async () => {
+  const [article] = await fetchFromHtml(`
+    <article><a href="/articles/d41586-026-02201-4">
+      <div class="c-article-item__copy">
+        <h3 class="c-article-item__title">I turn up late to meetings to dodge small talk. Am I wrong?</h3>
+        <div class="c-article-item__standfirst"><p>A jury weighs in on this question.</p></div>
+        <div class="c-article-item__footer">Career Feature | 30 SEP 2026</div>
+      </div>
+    </a></article>
+  `);
+  assert.equal(article.title, 'I turn up late to meetings to dodge small talk. Am I wrong?');
+});

@@ -42,7 +42,9 @@ function isNatureArticle(url: string): boolean {
 }
 
 function inferTitle(anchorHtml: string): string {
-  const title = stripHtml(anchorHtml);
+  // Some Nature links wrap the entire card, including standfirst and date.
+  const heading = /<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/i.exec(anchorHtml);
+  const title = stripHtml(heading ? heading[2] : anchorHtml);
   return title.replace(/^Nature\s+/, '').trim();
 }
 

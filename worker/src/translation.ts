@@ -69,7 +69,7 @@ export async function translateToChinese(
   configuredModel?: string,
 ): Promise<ChineseTranslation> {
   const hasSummary = Boolean(article.summary.trim());
-  const prompt = `请把下面这篇 Nature 文章信息整理成简体中文。\n\n要求：标题简洁准确，保留作者更正、撤稿等限定信息，不猜测或改写专有名词；${hasSummary
+  const prompt = `请把下面这篇 Nature 文章信息整理成简体中文。\n\n要求：titleZh 只翻译原标题，不从摘要补充人物、事件或结论；标题简洁准确，保留作者更正、撤稿等限定信息，不猜测或改写专有名词；${hasSummary
     ? '摘要用 2-3 句概括，忠于原意，不要编造。'
     : '没有英文摘要，只翻译标题；summaryZh 必须是空字符串，不要根据标题编造摘要。'}\n只返回 JSON，格式为 {"titleZh":"...","summaryZh":"..."}。\n\n原标题：${article.title}\n英文摘要：${article.summary || '（无）'}`;
   const result = await ai.run(configuredModel?.trim() || DEFAULT_AI_MODEL, {

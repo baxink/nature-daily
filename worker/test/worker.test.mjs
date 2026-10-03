@@ -1002,11 +1002,12 @@ test('failed summary fetching preserves Chinese fields and retries without a was
 });
 
 
-test('a complete seven-source digest stays under the free external-request budget with Nature redirects', async () => {
+test('a complete seven-source digest stays under the free external-request budget even if all translations need one retry', async () => {
   const mod = await loadModule('../src/index.ts');
   const state = { dailyCardsByDate: new Map(), recentArticleIdsBySource: new Map(), mediaNameBySource: new Map() };
   const savedFetch = globalThis.fetch;
   let externalRequests = 0;
+  let aiCalls = 0;
   const spend = (count) => { externalRequests += count; if (externalRequests > 50) throw new Error('Too many subrequests'); };
   globalThis.fetch = async (input) => {
     const url = new URL(typeof input === 'string' ? input : input.url);
@@ -1025,13 +1026,45 @@ test('a complete seven-source digest stays under the free external-request budge
     const response = await mod.default.fetch(new Request('https://example.com/api/ingest', {
       method: 'POST', headers: { Authorization: 'Bearer test-token' },
     }), { DB: createDbMock(state), INGEST_TOKEN: 'test-token', AI: { async run() {
-      spend(1); return { response: { titleZh: '一项新的科学发现', summaryZh: '一篇真实的科学文章摘要。' } };
+      spend(1); aiCalls++;
+      return aiCalls % 2 === 1 ? { response: { titleZh: 'English only', summaryZh: 'English only' } }
+        : { response: { titleZh: '一项新的科学发现', summaryZh: '一篇真实的科学文章摘要。' } };
     } } });
     const result = await response.json();
     assert.equal(result.successCount, 7);
     assert.equal(result.translationSucceeded, 7);
     assert.equal(result.translationFailed, 0);
+    assert.equal(aiCalls, 14);
     assert.ok(externalRequests <= 50);
     assert.equal(state.dailyCardsByDate.get(currentDigestDate()).size, 7);
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+
+test('records a partial update when feeds succeed but a Chinese translation is still missing', async () => {
+  const mod = await loadModule('../src/index.ts');
+  const state = translationState();
+  const before = { ...state.dailyCardsByDate.get(currentDigestDate()).get('nature-main-rss') };
+  const db = createDbMock(state);
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(typeof input === 'string' ? input : input.url);
+    if (url.pathname.startsWith('/articles/')) return new Response('<meta name="description" content="Real summary.">');
+    if (url.pathname.endsWith('.rss')) return new Response('<rss><channel><item><title>A real scientific discovery</title><link>https://www.nature.com/articles/test</link></item></channel></rss>');
+    return new Response('<article><a href="/articles/test">A real scientific discovery</a></article>');
+  };
+  try {
+    const response = await mod.default.fetch(new Request('https://example.com/api/ingest', {
+      method: 'POST', headers: { Authorization: 'Bearer test-token' },
+    }), { DB: db, INGEST_TOKEN: 'test-token', AI: { async run() {
+      return { response: { titleZh: 'English only', summaryZh: 'English only' } };
+    } } });
+    const result = await response.json();
+    assert.equal(result.successCount, 7);
+    assert.equal(result.status, 'partial');
+    assert.ok(result.translationFailed > 0);
+    assert.deepEqual(state.dailyCardsByDate.get(currentDigestDate()).get('nature-main-rss'), before);
+    const savedRun = db.queries.find(q => q.sql.startsWith('UPDATE ingest_runs SET'));
+    assert.equal(savedRun.params[1], 'partial');
   } finally { globalThis.fetch = savedFetch; }
 });

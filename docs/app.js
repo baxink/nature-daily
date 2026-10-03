@@ -286,7 +286,9 @@ export function createDigestApp({
       if (!res.ok) throw new Error('meta error');
       const data = await res.json();
       const configuredSourceCount = Math.max(SOURCE_SPECS.length, Number(data.sourceCount) || 0);
-      metaRoot.textContent = `已配置 ${configuredSourceCount} 个版面 · 已抓取 ${data.articleCount} 篇文章 · 已生成 ${data.digestCount} 期日报`;
+      const updateStatus = data.lastRunStatus === 'partial' ? ' · 最近更新有部分内容未完成'
+        : data.lastRunStatus === 'failed' ? ' · 最近更新失败' : '';
+      metaRoot.textContent = `已配置 ${configuredSourceCount} 个版面 · 已抓取 ${data.articleCount} 篇文章 · 已生成 ${data.digestCount} 期日报${updateStatus}`;
     } catch {
       metaRoot.textContent = '无法获取更新状态';
     }

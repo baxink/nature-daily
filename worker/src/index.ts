@@ -556,7 +556,8 @@ async function runIngest(env: Env): Promise<{
   const digestDate = toDigestDate();
   const { cards, translations } = await ensureDailyDigestCards(env, sources, articlesBySource, digestDate);
   errors.push(...translations.errors.map(error => `translation: ${error}`));
-  const status = successCount > 0 ? 'success' : 'failed';
+  const status = successCount === 0 ? 'failed'
+    : failureCount > 0 || translations.failed > 0 ? 'partial' : 'success';
   const finishedAt = new Date().toISOString();
 
   await env.DB.prepare(

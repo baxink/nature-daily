@@ -45,7 +45,7 @@ function inferTitle(anchorHtml: string): string {
   // Some Nature links wrap the entire card, including standfirst and date.
   const heading = /<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/i.exec(anchorHtml);
   const title = stripHtml(heading ? heading[2] : anchorHtml);
-  return title.replace(/^Nature\s+/, '').trim();
+  return title.trim();
 }
 
 function getHtmlAttribute(tag: string, name: string): string {

@@ -91,3 +91,9 @@ test('reads only the heading when a Nature article link wraps a whole card', asy
   `);
   assert.equal(article.title, 'I turn up late to meetings to dodge small talk. Am I wrong?');
 });
+
+
+test('preserves Nature when it is a word in the actual article title', async () => {
+  const [article] = await fetchFromHtml('<article><a href="/articles/nature-rights"><h3>Nature has rights — it is time the world recognized them</h3></a></article>');
+  assert.equal(article.title, 'Nature has rights — it is time the world recognized them');
+});

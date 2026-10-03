@@ -57,8 +57,8 @@ function parseTranslation(text: string, hasSummary: boolean): ChineseTranslation
   if (hasSummary && (!summaryZh || !HAN_CHARACTERS.test(summaryZh))) {
     throw new Error('AI translation summary is empty or lacks Chinese characters');
   }
-  if (!hasSummary && summaryZh && !HAN_CHARACTERS.test(summaryZh)) {
-    throw new Error('AI translation summary lacks Chinese characters');
+  if (!hasSummary && summaryZh) {
+    throw new Error('AI translation invented a summary without an English source');
   }
   return { titleZh, summaryZh };
 }
@@ -69,17 +69,29 @@ export async function translateToChinese(
   configuredModel?: string,
 ): Promise<ChineseTranslation> {
   const hasSummary = Boolean(article.summary.trim());
-  const prompt = `请把下面这篇 Nature 文章信息整理成简体中文。\n\n要求：titleZh 只翻译原标题，不从摘要补充人物、事件或结论；标题简洁准确，保留作者更正、撤稿等限定信息，不猜测或改写专有名词；${hasSummary
-    ? '摘要用 2-3 句概括，忠于原意，不要编造。'
+  const prompt = `把以下英文标题和英文摘要分别翻译成简体中文。titleZh 的值必须是中文标题，禁止照抄英文原标题。\n\n要求：titleZh 只翻译原标题，不从摘要补充人物、事件或结论；标题简洁准确，保留作者更正、撤稿等限定信息，不猜测或改写专有名词；${hasSummary
+    ? 'summaryZh 必须用简体中文；短摘要直接翻译，长摘要用 2-3 句概括，忠于原意，不添加事实或结论。'
     : '没有英文摘要，只翻译标题；summaryZh 必须是空字符串，不要根据标题编造摘要。'}\n只返回 JSON，格式为 {"titleZh":"...","summaryZh":"..."}。\n\n原标题：${article.title}\n英文摘要：${article.summary || '（无）'}`;
-  const result = await ai.run(configuredModel?.trim() || DEFAULT_AI_MODEL, {
-    messages: [
-      { role: 'system', content: '你是一个科研文章翻译助手，把英文 Nature 文章信息整理成简体中文，只输出 JSON。' },
-      { role: 'user', content: prompt },
-    ],
-    chat_template_kwargs: { enable_thinking: false },
-    max_tokens: 512,
-    temperature: 0.3,
-  });
-  return parseTranslation(responseText(result), hasSummary);
+  const model = configuredModel?.trim() || DEFAULT_AI_MODEL;
+  const system = 'Translate the English title and summary into Simplified Chinese. titleZh MUST be a Chinese translation, never a copy of the English title. summaryZh MUST be Chinese when an English summary is provided; otherwise it MUST be empty. Preserve scientific facts and proper names. Return only a JSON object with titleZh and summaryZh.';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    // Retry invalid model output once; provider/network errors propagate without
+    // another request, so quota failures cannot multiply calls.
+    const result = await ai.run(model, {
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: attempt === 0 ? prompt : `${prompt}\n\n上次回答未通过验证。两个字段都必须按要求使用简体中文，不得把英文原文作为 titleZh。没有英文摘要时 summaryZh 必须为空。` },
+      ],
+      response_format: { type: 'json_object' },
+      chat_template_kwargs: { enable_thinking: false },
+      max_tokens: 512,
+      temperature: 0,
+    });
+    try {
+      return parseTranslation(responseText(result), hasSummary);
+    } catch (error) {
+      if (attempt === 1) throw error;
+    }
+  }
+  throw new Error('AI translation failed validation');
 }

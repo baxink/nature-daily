@@ -336,3 +336,19 @@ test('renderDigest emits the class names required by the newspaper layout', () =
   assert.ok(document.querySelector('.section-columns'));
   assert.ok(document.querySelector('.section-story'));
 });
+
+
+test('shows incomplete or failed update status instead of silently reporting counts', async () => {
+  for (const status of ['partial', 'failed', 'success']) {
+    setupDom();
+    const app = createDigestApp({ fetchImpl: async () => new Response(JSON.stringify({
+      sourceCount: 7, articleCount: 42, digestCount: 3, lastRunStatus: status,
+    })) });
+    await app.fetchMeta();
+    const text = document.getElementById('metaInfo').textContent;
+    assert.match(text, /已配置 7 个版面/);
+    if (status === 'partial') assert.match(text, /部分内容未完成/);
+    if (status === 'failed') assert.match(text, /最近更新失败/);
+    if (status === 'success') assert.doesNotMatch(text, /未完成|失败/);
+  }
+});

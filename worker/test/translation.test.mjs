@@ -80,3 +80,38 @@ test('accepts structured response objects and OpenAI-compatible choices from cur
     assert.deepEqual(await mod.translateToChinese({ async run() { return result; } }, input), expected);
   }
 });
+
+
+test('retries an English-only model answer once and returns the validated Chinese answer', async () => {
+  let calls = 0;
+  const result = await mod.translateToChinese({ async run() {
+    calls++;
+    return calls === 1 ? { response: { titleZh: input.title, summaryZh: input.summary } }
+      : { response: { titleZh: '海洋科学的新发现', summaryZh: '研究人员发现了海洋环流的新模式。' } };
+  } }, input);
+  assert.equal(calls, 2);
+  assert.equal(result.titleZh, '海洋科学的新发现');
+});
+
+test('bounds retries for invalid translation output and does not retry provider failures', async () => {
+  let invalidCalls = 0;
+  await assert.rejects(() => mod.translateToChinese({ async run() {
+    invalidCalls++; return { response: { titleZh: '', summaryZh: '' } };
+  } }, input));
+  assert.equal(invalidCalls, 2);
+  let failedCalls = 0;
+  await assert.rejects(() => mod.translateToChinese({ async run() {
+    failedCalls++; throw new Error('provider quota exceeded');
+  } }, input), /quota exceeded/);
+  assert.equal(failedCalls, 1);
+});
+
+
+test('does not accept an invented Chinese summary when the English source has none', async () => {
+  let calls = 0;
+  const result = await mod.translateToChinese({ async run() {
+    calls++; return { response: { titleZh: '中文标题', summaryZh: calls === 1 ? '凭空生成的摘要。' : '' } };
+  } }, { title: input.title, summary: '' });
+  assert.equal(calls, 2);
+  assert.equal(result.summaryZh, '');
+});
